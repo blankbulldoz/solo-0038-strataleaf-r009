@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS versions (
 CREATE INDEX IF NOT EXISTS version_revision ON versions(rev);
 CREATE TABLE IF NOT EXISTS index_defs (
  collection TEXT NOT NULL, name TEXT NOT NULL, field TEXT NOT NULL, unique_flag INTEGER NOT NULL,
+ fields TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(collection,name), FOREIGN KEY(collection) REFERENCES collections(name));
 CREATE TABLE IF NOT EXISTS index_values (
  collection TEXT NOT NULL, name TEXT NOT NULL, token TEXT NOT NULL, key TEXT NOT NULL,
@@ -45,6 +46,26 @@ class Storage:
                 self.connection.execute("INSERT OR IGNORE INTO meta VALUES (?,?)", (key, value))
             if self.get("format") != "1":
                 raise DatabaseError("unsupported on-disk format")
+            self._migrate()
+
+    def _migrate(self):
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(index_defs)")}
+        if "fields" in columns:
+            return
+        from .codec import dumps, entry_token, loads
+        from .mvcc import visible_rows
+        self.connection.execute("ALTER TABLE index_defs ADD COLUMN fields TEXT NOT NULL DEFAULT ''")
+        for row in self.connection.execute("SELECT collection,name,field FROM index_defs").fetchall():
+            self.connection.execute("UPDATE index_defs SET fields=? WHERE collection=? AND name=?",
+                                    (dumps([row["field"]]), row["collection"], row["name"]))
+        self.connection.execute("DELETE FROM index_values")
+        for row in self.connection.execute("SELECT collection,name,fields FROM index_defs").fetchall():
+            paths = loads(row["fields"])
+            for document in visible_rows(self.connection, row["collection"], int(self.get("head"))):
+                token = entry_token(loads(document["body"]), paths)
+                if token is not None:
+                    self.connection.execute("INSERT INTO index_values VALUES (?,?,?,?)",
+                                            (row["collection"], row["name"], token, document["key"]))
 
     def get(self, key):
         row = self.connection.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()

@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from .codec import digest
 from .cursors import decode_cursor, encode_cursor
 from .errors import InvalidCursor, InvalidDocument, NotFound
-from .indexes import equality_candidates
+from .indexes import plan_index
 from .mvcc import checked_revision, record, visible_rows, latest_row
-from .predicates import equality_terms, matches, validate_predicate
+from .predicates import matches, validate_predicate
 
 
 @dataclass(frozen=True)
@@ -39,12 +39,9 @@ class QueryEngine:
             plan = {"access": "version_scan", "index": None}
             candidates = None
             if not force_scan and revision == int(self.store.get("head")):
-                for path, value in equality_terms(predicate):
-                    indexed = equality_candidates(connection, collection, path, value)
-                    if indexed is not None:
-                        index_name, candidates = indexed
-                        plan = {"access": "equality_index", "index": index_name}
-                        break
+                planned = plan_index(connection, collection, predicate)
+                if planned is not None:
+                    _, candidates, plan = planned
             if candidates is None:
                 rows = visible_rows(connection, collection, revision)
             else:

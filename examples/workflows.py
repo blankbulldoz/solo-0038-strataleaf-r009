@@ -69,7 +69,31 @@ def run(flow):
                 if indexed.records != scanned.records:
                     raise RuntimeError("index and scan differ")
                 collision = rejected(lambda: db.batch().put("segments", "new", {"region": "north", "sequence": 8, "code": "c0"}).commit(), Conflict)
-                output = {"plan": indexed.plan, "keys": [row.key for row in indexed.records], "collision": collision, "integrity": db.diagnostics.inspect(True)}
+                composite = db.indexes.create("segments", "by_region_sequence", ["region", "sequence"], unique=True)
+                ranged = db.query("segments", {"and": [{"field": "region", "op": "eq", "value": "east"},
+                                                       {"field": "sequence", "op": "ge", "value": 2},
+                                                       {"field": "sequence", "op": "le", "value": 4}]})
+                exact = db.query("segments", {"and": [{"field": "sequence", "op": "eq", "value": 3},
+                                                      {"field": "region", "op": "eq", "value": "west"}]})
+                suffix_only = db.query("segments", {"field": "sequence", "op": "eq", "value": 3})
+                if [row.key for row in ranged.records] != ["seg_02", "seg_04"] or [row.key for row in exact.records] != ["seg_03"]:
+                    raise RuntimeError("composite index returned wrong keys")
+                if suffix_only.plan["access"] != "version_scan":
+                    raise RuntimeError("predicate without the leading field must not use the composite index")
+                head_before = db.revision
+                residue = rejected(lambda: db.batch().put("segments", "residue_a", {"region": "north", "sequence": 1, "code": "ca"})
+                                                     .put("segments", "residue_b", {"region": "north", "sequence": 1, "code": "cb"}).commit(), Conflict)
+                if db.revision != head_before or db.get("segments", "residue_a") is not None or db.get("segments", "residue_b") is not None:
+                    raise RuntimeError("failed batch left residual state")
+                db.indexes.create("segments", "by_region_note", ["region", "note"], unique=True)
+                db.batch().put("segments", "null_a", {"region": "north", "sequence": 1, "note": None}).commit()
+                db.batch().put("segments", "skip_a", {"region": "north", "sequence": 2}).commit()
+                db.batch().put("segments", "skip_b", {"region": "north", "sequence": 3}).commit()
+                null_collision = rejected(lambda: db.batch().put("segments", "null_b", {"region": "north", "sequence": 4, "note": None}).commit(), Conflict)
+                output = {"plan": indexed.plan, "keys": [row.key for row in indexed.records], "collision": collision,
+                          "composite": composite, "ranged_plan": ranged.plan, "ranged_keys": [row.key for row in ranged.records],
+                          "exact_plan": exact.plan, "suffix_only_plan": suffix_only.plan, "residue": residue,
+                          "null_collision": null_collision, "integrity": db.diagnostics.inspect(True)}
             elif flow == "feed":
                 db.feed.register("mirror", 0)
                 db.batch().delete("segments", "seg_00").commit()
@@ -78,12 +102,15 @@ def run(flow):
                 output = {"complete_commit": commits, "ack": db.feed.position("mirror"),
                           "backward": rejected(lambda: db.feed.acknowledge("mirror", 0), Conflict)}
             elif flow == "backup":
+                db.indexes.create("segments", "by_region_sequence", ["region", "sequence"], unique=True)
                 backup = db.archives.backup(folder / "backup.db")
                 db.batch().delete("segments", "seg_00").commit()
                 bad = rejected(lambda: Archives.restore(folder / "backup.db", folder / "invalid.db", "wrong"), Exception)
                 Archives.restore(folder / "backup.db", folder / "restored.db", backup["sha256"])
                 with Database(folder / "restored.db") as restored:
-                    output = {"backup": backup, "restored": restored.diagnostics.fingerprint(), "bad_checksum": bad}
+                    violation = rejected(lambda: restored.batch().put("segments", "seg_09", {"region": "east", "sequence": 0}).commit(), Conflict)
+                    output = {"backup": backup, "restored": restored.diagnostics.fingerprint(), "bad_checksum": bad,
+                              "restored_indexes": restored.indexes.list("segments"), "composite_violation": violation}
                     if restored.revision != first:
                         raise RuntimeError("backup read boundary changed")
             elif flow == "replica":
@@ -92,6 +119,7 @@ def run(flow):
                 db.batch().put("segments", "seg_00", {"region": "north", "sequence": 19}).commit()
                 db.batch().delete("segments", "seg_01").commit()
                 db.indexes.create("segments", "by_region", "region")
+                db.indexes.create("segments", "by_region_sequence", ["region", "sequence"], unique=True)
                 with Database(folder / "replica.db") as replica:
                     part = db.replication.export(replica.revision, limit=1)
                     applied = replica.replication.apply(part)
@@ -101,7 +129,15 @@ def run(flow):
                     readonly = rejected(lambda: replica.batch().delete("segments", "seg_00").commit(), ReadOnly)
                     if replica.diagnostics.fingerprint() != db.diagnostics.fingerprint() or not replica.diagnostics.inspect(True)["ok"]:
                         raise RuntimeError("replica differs from source")
-                    output = {"first_packet": applied, "repeat": repeat, "readonly": readonly, "fingerprint": replica.diagnostics.fingerprint()}
+                    composite = next(item for item in replica.indexes.list("segments") if item["name"] == "by_region_sequence")
+                    fingerprint = replica.diagnostics.fingerprint()
+                    replica.archives.backup(folder / "replica_base.db")
+                Archives.restore(folder / "replica_base.db", folder / "replica_primary.db")
+                with Database(folder / "replica_primary.db") as promoted:
+                    violation = rejected(lambda: promoted.batch().put("segments", "seg_09", {"region": "north", "sequence": 19}).commit(), Conflict)
+                    promoted_ok = promoted.diagnostics.inspect(True)["ok"]
+                output = {"first_packet": applied, "repeat": repeat, "readonly": readonly, "fingerprint": fingerprint,
+                          "replica_composite": composite, "promoted_violation": violation, "promoted_ok": promoted_ok}
             elif flow == "compact":
                 db.retention.pin("reader", first)
                 db.feed.register("slow_copy", first)

@@ -45,7 +45,9 @@ class Replication:
                 connection.execute("DELETE FROM index_values")
                 connection.execute("DELETE FROM index_defs")
                 for definition in body["indexes"] if body["through"] == body["head"] else []:
-                    connection.execute("INSERT INTO index_defs VALUES (?,?,?,?)", (definition["collection"], definition["name"], definition["field"], definition["unique_flag"]))
+                    fields = definition.get("fields") or dumps([definition["field"]])
+                    connection.execute("INSERT INTO index_defs (collection,name,field,unique_flag,fields) VALUES (?,?,?,?,?)",
+                                       (definition["collection"], definition["name"], definition["field"], definition["unique_flag"], fields))
                 applied = 0
                 for commit in commits:
                     revision = commit["revision"]

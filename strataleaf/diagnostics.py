@@ -1,4 +1,5 @@
-from .codec import digest, field, loads, scalar_token
+from .codec import digest, entry_token, loads
+from .indexes import index_fields
 from .mvcc import visible_rows
 
 
@@ -29,9 +30,10 @@ class Diagnostics:
             if deep:
                 expected = set()
                 for definition in connection.execute("SELECT * FROM index_defs"):
+                    paths = index_fields(definition)
                     tokens = set()
                     for row in visible_rows(connection, definition["collection"], head):
-                        token = scalar_token(field(loads(row["body"]), definition["field"]))
+                        token = entry_token(loads(row["body"]), paths)
                         if token is None:
                             continue
                         if definition["unique_flag"] and token in tokens:

@@ -73,13 +73,3 @@ def matches(document, expression):
         return False
     return {"lt": lambda: value < other, "le": lambda: value <= other,
             "gt": lambda: value > other, "ge": lambda: value >= other}[op]()
-
-
-def equality_terms(expression):
-    if expression is None:
-        return []
-    if "and" in expression:
-        return [term for child in expression["and"] for term in equality_terms(child)]
-    if expression.get("op") == "eq":
-        return [(expression["field"], expression["value"])]
-    return []
